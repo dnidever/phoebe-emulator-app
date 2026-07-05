@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data/models
+*.pkl
+*.phoebe
+*.npy
+shape_templates/
+models/
+report_plots/
+*.html
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

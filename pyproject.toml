@@ -1,0 +1,14 @@
+[project]
+name = "phoebe-emulator-app"
+version = "0.1.0"
+description = "Streamlit app for exploring a PHOEBE eclipsing-binary light-curve emulator"
+requires-python = ">=3.9"
+dependencies = [
+  "streamlit>=1.31",
+  "numpy>=1.23",
+  "matplotlib>=3.7",
+  "pandas>=1.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["python"]
