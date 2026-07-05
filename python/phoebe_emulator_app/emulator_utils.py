@@ -9,6 +9,15 @@ from typing import Iterable
 import numpy as np
 
 LABEL_NAMES = ["r1_over_a", "r2_over_a", "incl", "sbratio", "q", "ecosw", "esinw"]
+DEFAULT_LABEL_RANGES = {
+    "r1_over_a": (0.02, 0.45),
+    "r2_over_a": (0.02, 0.45),
+    "incl": (65.0, 90.0),
+    "sbratio": (0.05, 2.0),
+    "q": (0.1, 1.0),
+    "ecosw": (-0.6, 0.6),
+    "esinw": (-0.6, 0.6),
+}
 NPHASE = 201
 PHASE_GRID = np.linspace(-0.5, 0.5, NPHASE, endpoint=False)
 
@@ -27,7 +36,7 @@ def _coerce_label_names(em: object) -> list[str]:
     names = getattr(em, "label_names", None)
     if names is None:
         names = getattr(em, "labels", None)
-    if names is None or len(names) != len(LABEL_NAMES):
+    if names is None:
         return LABEL_NAMES.copy()
     return [str(x) for x in names]
 

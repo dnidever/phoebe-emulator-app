@@ -10,15 +10,14 @@ import streamlit as st
 
 # Make local src package importable when running from a fresh clone.
 ROOT = Path(__file__).resolve().parent
-SRC = ROOT / "python"
+SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from phoebe_emulator_app.emulator_utils import (  # noqa: E402
-    LABEL_NAMES,
+    DEFAULT_LABEL_RANGES,
     PHASE_GRID,
     ecc_per0_from_ecosw_esinw,
-    ecosw_esinw_from_ecc_per0,
     in_training_range,
     labels_to_vector,
     lightcurve_metrics,
@@ -38,27 +37,91 @@ def cached_load_emulator(path: str):
 
 
 def default_model_candidates() -> list[str]:
-    candidates = []
-    for directory in [ROOT, ROOT / "models", ROOT / "shape_templates", Path.cwd()]:
+    """Find likely bundled or local model files."""
+    candidates: list[str] = []
+
+    preferred = [
+        ROOT / "python" / "phoebe_emulator_app" / "data" / "phoebe_shape_annmodel.pkl",
+        ROOT / "src" / "phoebe_emulator_app" / "data" / "phoebe_shape_annmodel.pkl",
+        ROOT / "data" / "phoebe_shape_annmodel.pkl",
+        ROOT / "phoebe_shape_annmodel.pkl",
+    ]
+    candidates.extend(str(p) for p in preferred if p.exists())
+
+    search_dirs = [
+        ROOT,
+        ROOT / "data",
+        ROOT / "models",
+        ROOT / "shape_templates",
+        ROOT / "python" / "phoebe_emulator_app" / "data",
+        ROOT / "src" / "phoebe_emulator_app" / "data",
+        Path.cwd(),
+    ]
+    for directory in search_dirs:
         if directory.exists():
             candidates.extend(str(p) for p in sorted(directory.glob("*.pkl")))
-    return sorted(set(candidates))
 
+    # Preserve order while deduplicating.
+    seen = set()
+    out = []
+    for c in candidates:
+        if c not in seen:
+            out.append(c)
+            seen.add(c)
+    return out
+
+
+def slider_step(lo: float, hi: float, name: str) -> float:
+    """Choose a useful slider step from the training range."""
+    if name.lower() in ["incl", "inclination", "per0", "omega"]:
+        return 0.05 if hi - lo <= 50 else 1.0
+    width = hi - lo
+    if width <= 0:
+        return 0.001
+    return max(width / 1000.0, 1e-5)
+
+
+def range_for(bundle, name: str) -> tuple[float, float]:
+    """Prefer emulator training ranges; fall back to known defaults."""
+    if bundle.label_min is not None and bundle.label_max is not None and name in bundle.label_names:
+        i = bundle.label_names.index(name)
+        lo = float(bundle.label_min[i])
+        hi = float(bundle.label_max[i])
+        if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+            return lo, hi
+    return DEFAULT_LABEL_RANGES.get(name, (0.0, 1.0))
+
+
+def default_value(name: str, lo: float, hi: float) -> float:
+    """Sensible starting value clipped to the available range."""
+    defaults = {
+        "r1_over_a": 0.15,
+        "r2_over_a": 0.10,
+        "incl": 85.0,
+        "sbratio": 0.5,
+        "q": 0.7,
+        "ecosw": 0.05,
+        "esinw": 0.05,
+    }
+    val = defaults.get(name, 0.5 * (lo + hi))
+    return float(np.clip(val, lo, hi))
 
 with st.sidebar:
-    st.header("Model")
     candidates = default_model_candidates()
     model_path = st.text_input(
-        "Emulator .pkl path",
-        value=candidates[0] if candidates else "",
-        help="Path to a trained theborg emulator pickle.",
+        "Model .pkl",
+        value=candidates[0] if candidates else "python/phoebe_emulator_app/data/phoebe_shape_annmodel.pkl",
+        label_visibility="collapsed",
     )
-    strict_range = st.checkbox("Require labels inside training range", value=True)
-    pad_fraction = st.slider("Training-range padding", 0.0, 0.25, 0.0, 0.01)
-    st.divider()
-    st.header("Plot")
-    y_limits = st.checkbox("Fix y-axis around eclipse", value=False)
-    show_residual = st.checkbox("Show comparison residual", value=True)
+
+    show_model_info = st.checkbox("Show model info", value=False)
+    strict_range = True
+    pad_fraction = 0.0
+    show_residual = True
+
+    fixed_ylimits = st.checkbox("Fixed y-axis", value=True)
+    if fixed_ylimits:
+        ymin, ymax = st.slider("Flux range", 0.0, 1.1, (0.4, 1.02), 0.01)
 
 if not model_path:
     st.info("Enter the path to a trained emulator `.pkl` file in the sidebar.")
@@ -70,59 +133,63 @@ except Exception as exc:
     st.error(f"Could not load emulator: {exc}")
     st.stop()
 
-if bundle.label_names != LABEL_NAMES:
-    st.warning(f"Loaded label names {bundle.label_names}; app expects {LABEL_NAMES}. Proceeding with loaded order.")
+# One slider for every emulator label, in exactly the order expected by the model.
+values: dict[str, float] = {}
+with st.sidebar:
+    #st.divider()
+    st.subheader("Parameters")
+    #st.caption("Sliders use the loaded emulator label names and training-label ranges when available.")
 
-# Slider ranges. Prefer actual training-label ranges when available.
-def range_for(name: str, fallback: tuple[float, float]) -> tuple[float, float]:
-    if bundle.label_min is None or bundle.label_max is None:
-        return fallback
-    i = bundle.label_names.index(name)
-    return float(bundle.label_min[i]), float(bundle.label_max[i])
-
-fallback_ranges = {
-    "r1_over_a": (0.02, 0.45),
-    "r2_over_a": (0.02, 0.45),
-    "incl": (65.0, 90.0),
-    "sbratio": (0.05, 2.0),
-    "q": (0.1, 1.0),
-    "ecosw": (-0.6, 0.6),
-    "esinw": (-0.6, 0.6),
-}
-
-st.subheader("Parameters")
-col1, col2, col3, col4 = st.columns(4)
-
-values = {}
-with col1:
-    lo, hi = range_for("r1_over_a", fallback_ranges["r1_over_a"])
-    values["r1_over_a"] = st.slider("R1/a", lo, hi, float(0.15 if lo <= 0.15 <= hi else 0.5 * (lo + hi)), step=(hi-lo)/500)
-    lo, hi = range_for("r2_over_a", fallback_ranges["r2_over_a"])
-    values["r2_over_a"] = st.slider("R2/a", lo, hi, float(0.10 if lo <= 0.10 <= hi else 0.5 * (lo + hi)), step=(hi-lo)/500)
-with col2:
-    lo, hi = range_for("incl", fallback_ranges["incl"])
-    values["incl"] = st.slider("Inclination [deg]", lo, hi, float(85.0 if lo <= 85.0 <= hi else 0.5 * (lo + hi)), step=0.05)
-    lo, hi = range_for("sbratio", fallback_ranges["sbratio"])
-    values["sbratio"] = st.slider("Surface brightness ratio", lo, hi, float(0.5 if lo <= 0.5 <= hi else 0.5 * (lo + hi)), step=(hi-lo)/500)
-with col3:
-    lo, hi = range_for("q", fallback_ranges["q"])
-    values["q"] = st.slider("Mass ratio q", lo, hi, float(0.7 if lo <= 0.7 <= hi else 0.5 * (lo + hi)), step=(hi-lo)/500)
-    eccentricity_mode = st.radio("Eccentricity controls", ["e cosω / e sinω", "e / ω"], horizontal=False)
-with col4:
-    if eccentricity_mode == "e cosω / e sinω":
-        lo, hi = range_for("ecosw", fallback_ranges["ecosw"])
-        values["ecosw"] = st.slider("e cosω", lo, hi, float(0.05 if lo <= 0.05 <= hi else 0.0), step=(hi-lo)/500)
-        lo, hi = range_for("esinw", fallback_ranges["esinw"])
-        values["esinw"] = st.slider("e sinω", lo, hi, float(0.05 if lo <= 0.05 <= hi else 0.0), step=(hi-lo)/500)
-    else:
-        ecc = st.slider("ecc", 0.0, 0.6, 0.1, step=0.005)
-        per0 = st.slider("ω / per0 [deg]", 0.0, 360.0, 45.0, step=1.0)
-        values["ecosw"], values["esinw"] = ecosw_esinw_from_ecc_per0(ecc, per0)
-        st.write(f"e cosω = `{values['ecosw']:.4f}`")
-        st.write(f"e sinω = `{values['esinw']:.4f}`")
+    st.markdown("""
+    <style>
+    section[data-testid="stSidebar"] .stSlider {
+        padding-top: 0rem;
+        padding-bottom: 0rem;
+    }
+    section[data-testid="stSidebar"] .stSlider > div {
+        padding-top: 0rem;
+        padding-bottom: 0rem;
+    }
+    section[data-testid="stSidebar"] label {
+        margin-bottom: -0.35rem;
+    }
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+        margin-bottom: 0rem;
+    }
+    section[data-testid="stSidebar"] hr {
+        margin-top: 0.4rem;
+        margin-bottom: 0.4rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    for name in bundle.label_names:
+        lo, hi = range_for(bundle, name)
+        step = slider_step(lo, hi, name)
+        label = {
+            "r1_over_a": "R1/a",
+            "r2_over_a": "R2/a",
+            "incl": "i",
+            "sbratio": "SB",
+            "q": "q",
+            "ecosw": "e cosω",
+            "esinw": "e sinω",
+        }.get(name, name)
+        values[name] = st.slider(
+            label,
+            min_value=float(lo),
+            max_value=float(hi),
+            value=default_value(name, lo, hi),
+            step=float(step),
+            key=f"slider_{name}",
+        )
 
 label_vector = labels_to_vector(values, bundle.label_names)
-ecc, per0 = ecc_per0_from_ecosw_esinw(values["ecosw"], values["esinw"])
+
+# Derived eccentricity/orientation display, if labels are present.
+ecc = per0 = np.nan
+if "ecosw" in values and "esinw" in values:
+    ecc, per0 = ecc_per0_from_ecosw_esinw(values["ecosw"], values["esinw"])
 
 inside, messages = in_training_range(label_vector, bundle, pad_fraction=pad_fraction)
 if not inside:
@@ -138,34 +205,51 @@ except Exception as exc:
 
 metrics = lightcurve_metrics(bundle.phase_grid, flux)
 
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("ecc", f"{ecc:.4f}")
-m2.metric("per0", f"{per0:.1f}°")
-m3.metric("depth", f"{metrics['depth']:.4f}")
-m4.metric("min flux", f"{metrics['min_flux']:.4f}")
-m5.metric("half-depth width", f"{metrics['eclipse_width_half_depth']:.3f}")
+metric_cols = st.columns(5)
+if np.isfinite(ecc):
+    metric_cols[0].metric("ecc", f"{ecc:.4f}")
+    metric_cols[1].metric("per0", f"{per0:.1f}°")
+else:
+    metric_cols[0].metric("labels", str(len(bundle.label_names)))
+    metric_cols[1].metric("phase pixels", str(len(bundle.phase_grid)))
+metric_cols[2].metric("depth", f"{metrics['depth']:.4f}")
+metric_cols[3].metric("min flux", f"{metrics['min_flux']:.4f}")
+metric_cols[4].metric("half-depth width", f"{metrics['eclipse_width_half_depth']:.3f}")
 
-fig, ax = plt.subplots(figsize=(9, 4.6))
-ax.plot(bundle.phase_grid, flux, lw=2, label="Emulator")
+fig, ax = plt.subplots(figsize=(9, 3.0))
+#fig, ax = plt.subplots(figsize=(9, 4.6))
+ax.plot(bundle.phase_grid, flux, lw=1.5, label="Emulator")
 ax.axhline(1.0, ls="--", lw=0.8)
 ax.set_xlabel("Phase")
 ax.set_ylabel("Normalized flux")
 ax.set_title("Emulated light curve")
 ax.legend()
-if y_limits:
-    pad = max(0.02, 0.15 * metrics["depth"])
-    ax.set_ylim(max(0, metrics["min_flux"] - pad), 1.0 + pad)
+#if y_limits:
+#    pad = max(0.02, 0.15 * metrics["depth"])
+#    ax.set_ylim(max(0, metrics["min_flux"] - pad), 1.0 + pad)
+if fixed_ylimits:
+    ax.set_ylim(ymin, ymax)
 st.pyplot(fig, clear_figure=True)
 
 with st.expander("Parameter vector"):
     display = pd.DataFrame({"label": bundle.label_names, "value": label_vector})
+    if bundle.label_min is not None and bundle.label_max is not None:
+        display["training_min"] = bundle.label_min
+        display["training_max"] = bundle.label_max
     st.dataframe(display, hide_index=True, use_container_width=True)
 
-with st.expander("Compare two models"):
+with st.expander("Compare two curves"):
     st.write("Make a second curve by perturbing one parameter from the current setting.")
-    p_name = st.selectbox("Parameter to change", bundle.label_names, index=2)
-    p_lo, p_hi = range_for(p_name, fallback_ranges[p_name])
-    p2 = st.slider(f"Comparison {p_name}", p_lo, p_hi, float(values[p_name]), step=(p_hi-p_lo)/500, key="compare_slider")
+    p_name = st.selectbox("Parameter to change", bundle.label_names, index=0)
+    p_lo, p_hi = range_for(bundle, p_name)
+    p2 = st.slider(
+        f"Comparison {p_name}",
+        min_value=float(p_lo),
+        max_value=float(p_hi),
+        value=float(values[p_name]),
+        step=float(slider_step(p_lo, p_hi, p_name)),
+        key="compare_slider",
+    )
 
     values2 = dict(values)
     values2[p_name] = p2
