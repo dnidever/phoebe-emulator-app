@@ -7,3 +7,4 @@ pandas>=1.5
 # pip install git+https://github.com/dnidever/theborg.git
 theborg
 torch
+dill
