@@ -5,3 +5,4 @@ matplotlib>=3.7
 pandas>=1.5
 # Install theborg separately if needed, for example:
 # pip install git+https://github.com/dnidever/theborg.git
+theborg
